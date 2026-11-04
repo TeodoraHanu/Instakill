@@ -205,10 +205,19 @@ function clearMedia() {
 
 function formatMediaUrl(url) {
   if (!url) return ''
+  
+  let fullUrl = url
   if (url.startsWith('/media/')) {
-    return 'http://localhost:8080' + url
+    fullUrl = 'http://localhost:8080' + url
   }
-  return url
+  
+  
+  if (!isVideo(url)) {
+    const separator = fullUrl.includes('?') ? '&' : '?'
+    return `${fullUrl}${separator}t=${Date.now()}`
+  }
+  
+  return fullUrl
 }
 
 function isVideo(url) {
@@ -467,6 +476,8 @@ async function logout() {
   margin-top: 0.75rem;
   width: 100%;
   border-radius: 12px;
+  max-width: 300px;
+  height: auto;
 }
 
 .post footer {

@@ -16,7 +16,7 @@ public class ImageProcessingService {
     public void processImage(File inputFile, File outputFile) throws IOException {
         BufferedImage originalImage = ImageIO.read(inputFile);
         if (originalImage == null) {
-            return; // Nu este o imagine validă (ex: e video)
+            return;
         }
 
         BufferedImage watermark = createWatermarkImage("Instakill Demo");

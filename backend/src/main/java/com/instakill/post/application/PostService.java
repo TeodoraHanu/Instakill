@@ -13,7 +13,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.io.File;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -49,24 +51,30 @@ public class PostService {
             try {
                 String filename = new File(imageUrl).getName();
 
-                // Căutăm fișierul fizic pe disc în locurile posibile
-                File imageFile = new File(imageUrl);
-                if (!imageFile.exists()) {
-                    imageFile = new File(filename);
-                }
-                if (!imageFile.exists()) {
-                    imageFile = new File("uploads", filename);
-                }
-                if (!imageFile.exists()) {
-                    imageFile = new File("media", filename);
+                File[] candidateFiles = new File[] {
+                        new File("media", filename),
+                        new File("uploads", filename),
+                        new File(imageUrl),
+                        new File(filename)
+                };
+
+                Set<String> processedPaths = new HashSet<>();
+                boolean processedAny = false;
+
+                for (File file : candidateFiles) {
+                    String canonicalPath = file.getCanonicalPath();
+                    if (file.exists() && !processedPaths.contains(canonicalPath)) {
+                        imageProcessingService.processImage(file, file);
+                        processedPaths.add(canonicalPath);
+                        System.out.println(">>> OK: Imaginea a fost procesata la: " + canonicalPath);
+                        processedAny = true;
+                    }
                 }
 
-                if (imageFile.exists()) {
-                    imageProcessingService.processImage(imageFile, imageFile);
-                    System.out.println(">>> OK: Imaginea a fost procesată la calea: " + imageFile.getAbsolutePath());
-                } else {
-                    System.err.println(">>> EROARE: Imaginea nu a fost găsită la calea: " + imageFile.getAbsolutePath());
+                if (!processedAny) {
+                    System.err.println(">>> EROARE: Fisierul nu a fost gasit in niciun folder pentru " + filename);
                 }
+
             } catch (Exception e) {
                 System.err.println(">>> EROARE la procesarea imaginii: " + e.getMessage());
                 e.printStackTrace();
@@ -85,7 +93,6 @@ public class PostService {
         );
 
         Post savedPost = posts.save(post);
-
 
         notificationService.sendPostCreatedNotification(authorId.toString(), savedPost.id());
 
