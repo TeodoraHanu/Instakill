@@ -19,3 +19,9 @@ gradle/wrapper/
 **/gradle/wrapper/**
 **/.gradle/
 .temp/
+media/
+**/media/*
+*.mp4
+*.jpg
+*.jpeg
+*.png

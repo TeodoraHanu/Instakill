@@ -11,6 +11,7 @@ import com.instakill.post.domain.PostRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.File;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -23,17 +24,55 @@ public class PostService {
     private final IdGenerator idGenerator;
     private final Clock clock;
     private final FeedService feedService;
+    private final ImageProcessingService imageProcessingService;
+    private final NotificationService notificationService;
 
-    public PostService(PostRepository posts, IdGenerator idGenerator, Clock clock, FeedService feedService) {
+    public PostService(PostRepository posts,
+                       IdGenerator idGenerator,
+                       Clock clock,
+                       FeedService feedService,
+                       ImageProcessingService imageProcessingService,
+                       NotificationService notificationService) {
         this.posts = posts;
         this.idGenerator = idGenerator;
         this.clock = clock;
         this.feedService = feedService;
+        this.imageProcessingService = imageProcessingService;
+        this.notificationService = notificationService;
     }
 
     @Transactional
     public Post createPost(UUID authorId, String content, String imageUrl) {
         Instant now = clock.now();
+
+        if (imageUrl != null && !imageUrl.isBlank()) {
+            try {
+                String filename = new File(imageUrl).getName();
+
+                // Căutăm fișierul fizic pe disc în locurile posibile
+                File imageFile = new File(imageUrl);
+                if (!imageFile.exists()) {
+                    imageFile = new File(filename);
+                }
+                if (!imageFile.exists()) {
+                    imageFile = new File("uploads", filename);
+                }
+                if (!imageFile.exists()) {
+                    imageFile = new File("media", filename);
+                }
+
+                if (imageFile.exists()) {
+                    imageProcessingService.processImage(imageFile, imageFile);
+                    System.out.println(">>> OK: Imaginea a fost procesată la calea: " + imageFile.getAbsolutePath());
+                } else {
+                    System.err.println(">>> EROARE: Imaginea nu a fost găsită la calea: " + imageFile.getAbsolutePath());
+                }
+            } catch (Exception e) {
+                System.err.println(">>> EROARE la procesarea imaginii: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
         Post post = new Post(
                 idGenerator.generate(),
                 authorId,
@@ -44,7 +83,13 @@ public class PostService {
                 0L,
                 0L
         );
-        return posts.save(post);
+
+        Post savedPost = posts.save(post);
+
+
+        notificationService.sendPostCreatedNotification(authorId.toString(), savedPost.id());
+
+        return savedPost;
     }
 
     public Post getPost(UUID id) {

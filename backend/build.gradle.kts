@@ -39,6 +39,7 @@ dependencies {
     testImplementation("org.assertj:assertj-core:3.26.3")
     testImplementation("org.mockito:mockito-core:5.14.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    implementation("net.coobird:thumbnailator:0.4.20")
 }
 
 repositories {
