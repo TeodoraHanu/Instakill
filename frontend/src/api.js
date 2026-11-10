@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 const client = axios.create({
+  
   withCredentials: true
 })
 
@@ -34,4 +35,9 @@ export function addComment(postId, payload) {
 
 export function listComments(postId) {
   return client.get(`/api/posts/${postId}/comments`).then(res => res.data)
+}
+
+export function getAnalytics(username) {
+  const headers = username ? { 'X-User-Name': username } : {}
+  return client.get('/api/analytics', { headers }).then(res => res.data)
 }
