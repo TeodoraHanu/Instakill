@@ -1,9 +1,9 @@
-
 import argparse
 import random
-import sqlite3
+import psycopg2
+from psycopg2.extras import execute_batch
 import uuid
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 import bcrypt
 from faker import Faker
@@ -11,12 +11,12 @@ from faker import Faker
 fake = Faker()
 
 SQL_USER = ("INSERT INTO users (id, username, email, password_hash, created_at) "
-            "VALUES (?, ?, ?, ?, ?)")
+            "VALUES (%s, %s, %s, %s, %s)")
 SQL_POST = ("INSERT INTO posts (id, author_id, content, image_url, created_at, updated_at, "
-            "like_count, comment_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-SQL_LIKE = "INSERT INTO likes (id, post_id, user_id, created_at) VALUES (?, ?, ?, ?)"
+            "like_count, comment_count) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)")
+SQL_LIKE = "INSERT INTO likes (id, post_id, user_id, created_at) VALUES (%s, %s, %s, %s)"
 SQL_COMMENT = ("INSERT INTO comments (id, post_id, author_id, content, created_at) "
-               "VALUES (?, ?, ?, ?, ?)")
+               "VALUES (%s, %s, %s, %s, %s)")
 
 SAMPLE_VIDEOS = [
     "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
@@ -53,7 +53,7 @@ INTEGRITY_CHECKS = {
         "WHERE p.comment_count != COALESCE(c.n, 0)"),
     "like-uri duplicate": (
         "SELECT COUNT(*) FROM (SELECT 1 FROM likes "
-        "GROUP BY post_id, user_id HAVING COUNT(*) > 1)"),
+        "GROUP BY post_id, user_id HAVING COUNT(*) > 1) AS dup"),
 }
 
 
@@ -61,30 +61,28 @@ def generate_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def to_ms(dt: datetime) -> int:
-    """datetime -> milisecunde epoch (formatul folosit de backend)."""
-    return int(dt.timestamp() * 1000)
-
-
 def random_datetime_in_range(start: datetime, end: datetime) -> datetime:
     """Data aleasa cu faker.date_between_dates(), plus o ora aleatoare, in [start, end]."""
     d = fake.date_between_dates(date_start=start.date(), date_end=end.date())
-    dt = datetime.combine(d, time.min) + timedelta(seconds=random.randint(0, 86399))
+    dt = datetime.combine(d, time.min, tzinfo=timezone.utc) + timedelta(seconds=random.randint(0, 86399))
     return max(start, min(dt, end))
 
 
-def flush(cursor, sql, rows):
+def random_between(start: datetime, end: datetime) -> datetime:
+    delta_sec = max(0, int((end - start).total_seconds()))
+    return start + timedelta(seconds=random.randint(0, delta_sec))
+
+
+def flush(cursor, sql, rows, batch_size):
     if rows:
-        cursor.executemany(sql, rows)
+        execute_batch(cursor, sql, rows, page_size=batch_size)
         rows.clear()
 
 
-def populate(db_path: str, num_users: int, batch_size: int):
-    conn = sqlite3.connect(db_path)
-    conn.isolation_level = None  # controlam manual tranzactia
+def populate(db_params: dict, num_users: int, batch_size: int):
+    conn = psycopg2.connect(**db_params)
+    conn.autocommit = False
     cursor = conn.cursor()
-    cursor.execute("PRAGMA foreign_keys = OFF;")
-    cursor.execute("BEGIN;")
 
     try:
         # ---------- Cleanup ----------
@@ -94,25 +92,26 @@ def populate(db_path: str, num_users: int, batch_size: int):
         cursor.execute("DELETE FROM posts;")
         cursor.execute("DELETE FROM users WHERE username NOT IN ('alice', 'bob');")
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         start_date = now - timedelta(days=7)
-        now_ms = to_ms(now)
 
-        used_names = {r[0] for r in cursor.execute("SELECT username FROM users")}
-        used_emails = {r[0] for r in cursor.execute("SELECT email FROM users")}
-        all_user_ids = [r[0] for r in cursor.execute("SELECT id FROM users")]
+        cursor.execute("SELECT username FROM users")
+        used_names = {r[0] for r in cursor.fetchall()}
+        cursor.execute("SELECT email FROM users")
+        used_emails = {r[0] for r in cursor.fetchall()}
+        cursor.execute("SELECT id FROM users")
+        all_user_ids = [r[0] for r in cursor.fetchall()]
 
         # ---------- charlie ----------
         charlie_id = str(uuid.uuid4())
         cursor.execute(SQL_USER, (charlie_id, "charlie", "charlie@example.com",
-                                  generate_password_hash("password"), to_ms(now)))
+                                  generate_password_hash("password"), now))
         used_names.add("charlie")
         used_emails.add("charlie@example.com")
         all_user_ids.append(charlie_id)
 
         # ---------- Users ----------
         print(f">>> Creating {num_users} users...")
-        # Un singur hash bcrypt reutilizat (hash per user ar dura minute)
         default_pass = generate_password_hash("password123")
         users_batch = []
         for _ in range(num_users):
@@ -128,12 +127,12 @@ def populate(db_path: str, num_users: int, batch_size: int):
 
             u_id = str(uuid.uuid4())
             all_user_ids.append(u_id)
-            created = to_ms(random_datetime_in_range(start_date, now))
+            created = random_datetime_in_range(start_date, now)
             users_batch.append((u_id, username, email, default_pass, created))
 
             if len(users_batch) >= batch_size:
-                flush(cursor, SQL_USER, users_batch)
-        flush(cursor, SQL_USER, users_batch)
+                flush(cursor, SQL_USER, users_batch, batch_size)
+        flush(cursor, SQL_USER, users_batch, batch_size)
 
         # ---------- Posts, likes, comments ----------
         print(">>> Creating posts, likes & comments...")
@@ -146,68 +145,74 @@ def populate(db_path: str, num_users: int, batch_size: int):
                 content = " ".join(fake.words(nb=random.randint(1, 10)))
 
                 if random.choice([True, False]):
-                    image_url = random.choice(SAMPLE_VIDEOS)                   # video
+                    image_url = random.choice(SAMPLE_VIDEOS)
                 else:
-                    image_url = f"https://picsum.photos/seed/{p_id}/600/400"   # photo
+                    image_url = f"https://picsum.photos/seed/{p_id}/600/400"
 
-                p_ms = to_ms(random_datetime_in_range(start_date, now))
+                p_ts = random_datetime_in_range(start_date, now)
 
                 # Like-uri: useri distincti per postare
                 n_likes = min(random.randint(0, 20), len(all_user_ids))
                 likers = random.sample(all_user_ids, n_likes)
                 for liker_id in likers:
-                    l_ms = random.randint(p_ms, now_ms)
-                    likes_b.append((str(uuid.uuid4()), p_id, liker_id, l_ms))
+                    l_ts = random_between(p_ts, now)
+                    likes_b.append((str(uuid.uuid4()), p_id, liker_id, l_ts))
 
                 # Comentarii
                 n_comments = random.randint(0, 10)
                 for _ in range(n_comments):
-                    c_ms = random.randint(p_ms, now_ms)
+                    c_ts = random_between(p_ts, now)
                     comments_b.append((
                         str(uuid.uuid4()), p_id, random.choice(all_user_ids),
-                        " ".join(fake.words(nb=random.randint(1, 10))), c_ms))
+                        " ".join(fake.words(nb=random.randint(1, 10))), c_ts))
 
-                posts_b.append((p_id, user_id, content, image_url, p_ms, p_ms,
+                posts_b.append((p_id, user_id, content, image_url, p_ts, p_ts,
                                 n_likes, n_comments))
                 total_posts += 1
 
                 if (len(posts_b) >= batch_size or len(likes_b) >= batch_size
                         or len(comments_b) >= batch_size):
-                    flush(cursor, SQL_POST, posts_b)
-                    flush(cursor, SQL_LIKE, likes_b)
-                    flush(cursor, SQL_COMMENT, comments_b)
+                    flush(cursor, SQL_POST, posts_b, batch_size)
+                    flush(cursor, SQL_LIKE, likes_b, batch_size)
+                    flush(cursor, SQL_COMMENT, comments_b, batch_size)
 
-        flush(cursor, SQL_POST, posts_b)
-        flush(cursor, SQL_LIKE, likes_b)
-        flush(cursor, SQL_COMMENT, comments_b)
+        flush(cursor, SQL_POST, posts_b, batch_size)
+        flush(cursor, SQL_LIKE, likes_b, batch_size)
+        flush(cursor, SQL_COMMENT, comments_b, batch_size)
 
-        # ---------- Index (accelereaza verificarile si analytics) ----------
+        # ---------- Index ----------
         print(">>> Creez indexul pe likes(post_id)...")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_likes_post ON likes (post_id);")
 
         # ---------- Verificari de integritate ----------
         print(">>> Verific integritatea datelor...")
         for name, query in INTEGRITY_CHECKS.items():
-            n = cursor.execute(query).fetchone()[0]
+            cursor.execute(query)
+            n = cursor.fetchone()[0]
             print(f"    {name}: {n}")
             assert n == 0, f"Integritate incalcata: {name} ({n})"
 
-        cursor.execute("COMMIT;")
+        conn.commit()
         print(f">>> Gata: {len(all_user_ids)} useri, {total_posts} postari.")
     except BaseException:
         try:
-            cursor.execute("ROLLBACK;")
-        except sqlite3.Error:
+            conn.rollback()
+        except psycopg2.Error:
             pass
         print(">>> Eroare/intrerupere, ROLLBACK efectuat. Baza de date nu a fost modificata.")
         raise
     finally:
+        cursor.close()
         conn.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Populate Instakill SQLite Database")
-    parser.add_argument("--db", default="instakill.db", help="Calea catre baza SQLite")
+    parser = argparse.ArgumentParser(description="Populate Instakill PostgreSQL Database")
+    parser.add_argument("--host", default="localhost", help="PostgreSQL host")
+    parser.add_argument("--port", type=int, default=5432, help="PostgreSQL port")
+    parser.add_argument("--dbname", default="instakill", help="Numele bazei de date")
+    parser.add_argument("--user", default="instakill", help="Userul PostgreSQL")
+    parser.add_argument("--password", default="instakill_password", help="Parola PostgreSQL")
     parser.add_argument("--users", type=int, default=10000, help="Numar de useri generati")
     parser.add_argument("--batch-size", type=int, default=5000, help="Randuri per batch")
     parser.add_argument("--seed", type=int, default=None, help="Seed pentru date reproductibile")
@@ -217,4 +222,12 @@ if __name__ == "__main__":
         random.seed(args.seed)
         Faker.seed(args.seed)
 
-    populate(args.db, args.users, args.batch_size)
+    db_params = {
+        "host": args.host,
+        "port": args.port,
+        "dbname": args.dbname,
+        "user": args.user,
+        "password": args.password,
+    }
+
+    populate(db_params, args.users, args.batch_size)

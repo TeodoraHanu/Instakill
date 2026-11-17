@@ -8,10 +8,11 @@ spring:
       max-file-size: 200MB
       max-request-size: 200MB
   datasource:
-    url: jdbc:sqlite:./instakill.db
-    driver-class-name: org.sqlite.JDBC
+    url: jdbc:postgresql://localhost:5432/instakill
+    driver-class-name: org.postgresql.Driver
+    username: instakill
+    password: instakill_password
   jpa:
-    database-platform: org.hibernate.community.dialect.SQLiteDialect
     hibernate:
       ddl-auto: update
     open-in-view: false

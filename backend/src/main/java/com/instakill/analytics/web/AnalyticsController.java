@@ -23,7 +23,7 @@ public class AnalyticsController {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    @GetMapping
+    @GetMapping({"", "/me"})
     public AnalyticsResponse getAnalytics(
             @RequestHeader(value = "X-User-Name", required = false) String customUserHeader,
             @RequestParam(value = "username", required = false) String paramUser
